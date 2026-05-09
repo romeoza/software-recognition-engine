@@ -2,6 +2,11 @@
 $classFiles = Get-ChildItem "$PSScriptRoot\Classes\*.ps1" | Sort-Object Name
 foreach ($f in $classFiles) { . $f.FullName }
 
+# Load data files (BuiltInRules etc.) in the same module scope as the classes.
+# Must happen AFTER classes so [NormalizationRule] resolves to the same type identity.
+$dataFiles = Get-ChildItem "$PSScriptRoot\Data\*.ps1" -ErrorAction SilentlyContinue
+foreach ($f in $dataFiles) { . $f.FullName }
+
 # Load private helpers (not exported)
 $privateFiles = Get-ChildItem "$PSScriptRoot\Private\*.ps1" -ErrorAction SilentlyContinue
 foreach ($f in $privateFiles) { . $f.FullName }

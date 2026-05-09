@@ -402,37 +402,40 @@ No MySQL connection string found. Supply one via:
     }
 
     hidden [void] _LoadRulesFromDb() {
-        # Load any custom rules persisted in DB
         $rows = @(Invoke-SqlQuery -ConnectionName $this.ConnectionName `
             -Query 'SELECT * FROM NormalizationRules WHERE IsActive = 1 ORDER BY Priority')
 
-        $rules = foreach ($row in $rows) {
-            [NormalizationRule]@{
-                RuleId          = $row.RuleId
-                RuleName        = $row.RuleName
-                Priority        = [int]$row.Priority
-                IsActive        = [bool]$row.IsActive
-                IsBuiltIn       = [bool]$row.IsBuiltIn
-                IsExcludeRule   = [bool]$row.IsExcludeRule
-                VendorPattern   = $row.VendorPattern
-                NamePattern     = $row.NamePattern
-                TargetFamily    = $row.TargetFamily
-                TargetVendor    = $row.TargetVendor
-                StripPatterns   = @(($row.StripPatterns  | ConvertFrom-Json) | Where-Object { $_ })
-                Transformations = @(($row.Transformations | ConvertFrom-Json) | Where-Object { $_ } |
-                                  ForEach-Object { @{ Field = $_.Field; Pattern = $_.Pattern; Replacement = $_.Replacement } })
-                Description     = $row.Description
-            }
-        }
-
-        if ($rules.Count -eq 0) {
-            # First run — seed built-in rules
-            . (Join-Path $PSScriptRoot '..\Data\BuiltInRules.ps1')
+        if ($rows.Count -eq 0) {
+            # First run — seed built-in rules.
+            # Get-SREBuiltInRules is dot-sourced at module load time (psm1 → Data/*.ps1),
+            # so [NormalizationRule] objects it creates share the same type identity as the engine.
             $builtIn = Get-SREBuiltInRules
             foreach ($r in $builtIn) { $this._SaveRuleToDb($r) }
             $this._engine.LoadRules($builtIn)
         } else {
-            $this._engine.LoadRules($rules)
+            # Build into a typed List so ToArray() returns NormalizationRule[], not Object[].
+            # foreach-output is untyped Object[]; passing that to LoadRules([NormalizationRule[]])
+            # causes a type-identity failure when the module has been reloaded in the same session.
+            $typed = [System.Collections.Generic.List[NormalizationRule]]::new()
+            foreach ($row in $rows) {
+                $typed.Add([NormalizationRule]@{
+                    RuleId          = $row.RuleId
+                    RuleName        = $row.RuleName
+                    Priority        = [int]$row.Priority
+                    IsActive        = [bool]$row.IsActive
+                    IsBuiltIn       = [bool]$row.IsBuiltIn
+                    IsExcludeRule   = [bool]$row.IsExcludeRule
+                    VendorPattern   = $row.VendorPattern
+                    NamePattern     = $row.NamePattern
+                    TargetFamily    = $row.TargetFamily
+                    TargetVendor    = $row.TargetVendor
+                    StripPatterns   = @(($row.StripPatterns  | ConvertFrom-Json) | Where-Object { $_ })
+                    Transformations = @(($row.Transformations | ConvertFrom-Json) | Where-Object { $_ } |
+                                      ForEach-Object { @{ Field = $_.Field; Pattern = $_.Pattern; Replacement = $_.Replacement } })
+                    Description     = $row.Description
+                })
+            }
+            $this._engine.LoadRules($typed.ToArray())
         }
     }
 
