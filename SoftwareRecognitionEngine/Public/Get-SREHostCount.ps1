@@ -34,7 +34,7 @@ function Get-SREHostCount {
             return
         }
         if ($families.Count -gt 1) {
-            Write-Warning "$($families.Count) families match '$FamilyName' — using '$($families[0].FamilyName)'. Use -FamilyId to be specific."
+            Write-Warning "$($families.Count) families match '$FamilyName' using '$($families[0].FamilyName)'. Use -FamilyId to be specific."
         }
         $resolvedFamilyId = [int]$families[0].FamilyId
     }

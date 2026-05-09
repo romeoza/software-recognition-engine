@@ -41,7 +41,7 @@ function Get-SREProduct {
         }
         # Use first match; warn if ambiguous
         if ($families.Count -gt 1) {
-            Write-Warning "$($families.Count) families match '$FamilyName' — using '$($families[0].FamilyName)' (FamilyId $($families[0].FamilyId)). Use -FamilyId to be specific."
+            Write-Warning "$($families.Count) families match '$FamilyName' using '$($families[0].FamilyName)' (FamilyId $($families[0].FamilyId)). Use -FamilyId to be specific."
         }
         $resolvedFamilyId = [int]$families[0].FamilyId
     } elseif ($FamilyId -gt 0) {
