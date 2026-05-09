@@ -7,6 +7,9 @@ function New-SRERule {
         VendorPattern, NamePattern, and StripPatterns, then saves the rule to the database.
         Pipe the output of Get-SREUnrecognized, filter to the items you want grouped, and
         pass them here with a target family name.
+
+        Use -Exclude to create an exclusion rule that suppresses matched items from
+        recognition results (e.g. OS components, update agents, noise).
     .PARAMETER Catalog
         A SoftwareCatalog instance (from New-SoftwareCatalog).
     .PARAMETER Items
@@ -14,11 +17,16 @@ function New-SRERule {
         RawVendor and RawName properties.
     .PARAMETER FamilyName
         The canonical product family name to assign matching items to.
+        Not required when -Exclude is specified.
     .PARAMETER Vendor
         Target vendor string stored with the family. Auto-derived from the most common
         RawVendor in the items if not supplied.
     .PARAMETER Priority
         Rule priority. Lower numbers run first. Default 55 (custom rule range: 50-79).
+        Use a value below 10 for exclusion rules so they run before any match rules.
+    .PARAMETER Exclude
+        Creates an exclusion rule. Matched items are suppressed from recognition output
+        and will not be assigned a family. FamilyName is optional when this switch is set.
     .PARAMETER WhatIf
         Generates and displays the rule without saving it or touching the database.
     .PARAMETER Reprocess
@@ -29,6 +37,9 @@ function New-SRERule {
         New-SRERule -Catalog $c -Items $items -FamilyName 'SAP Business Client' -Vendor 'SAP' -WhatIf
     .EXAMPLE
         New-SRERule -Catalog $c -Items $items -FamilyName 'SAP Business Client' -Vendor 'SAP' -Reprocess
+    .EXAMPLE
+        $noise = Get-SREUnrecognized -Catalog $c | Where-Object { $_.RawVendor -like '*Microsoft*' -and $_.RawName -like 'KB*' }
+        New-SRERule -Catalog $c -Items $noise -Exclude -Priority 5
     #>
     [CmdletBinding()]
     param(
@@ -38,13 +49,14 @@ function New-SRERule {
         [Parameter(Mandatory, ValueFromPipeline)]
         [PSObject[]] $Items,
 
-        [Parameter(Mandatory)]
         [string] $FamilyName,
 
         [string] $Vendor,
 
         [ValidateRange(1, 999)]
         [int] $Priority = 55,
+
+        [switch] $Exclude,
 
         [switch] $WhatIf,
 
@@ -65,10 +77,15 @@ function New-SRERule {
             return
         }
 
+        if (-not $Exclude -and -not $FamilyName) {
+            Write-Warning '-FamilyName is required unless -Exclude is specified.'
+            return
+        }
+
         $vendors = @($allItems | ForEach-Object { [string]$_.RawVendor } | Where-Object { $_ } | Select-Object -Unique)
         $names   = @($allItems | ForEach-Object { [string]$_.RawName   } | Where-Object { $_ } | Select-Object -Unique)
 
-        # ── VendorPattern ─────────────────────────────────────────────────────────
+        # VendorPattern
         $escapedVendors = @($vendors | ForEach-Object { [regex]::Escape($_) })
         $vendorPattern  = if ($escapedVendors.Count -eq 1) {
             $escapedVendors[0]
@@ -76,7 +93,7 @@ function New-SRERule {
             "($($escapedVendors -join '|'))"
         }
 
-        # ── NamePattern (longest common prefix) ───────────────────────────────────
+        # NamePattern (longest common prefix)
         $namePattern = ''
         if ($names.Count -eq 1) {
             $namePattern = '^' + [regex]::Escape($names[0])
@@ -92,43 +109,53 @@ function New-SRERule {
             if ($prefix.Length -ge 3) {
                 $namePattern = '^' + [regex]::Escape($prefix)
             } else {
-                Write-Warning "Names are too diverse for a common prefix (shortest prefix: '$prefix'). NamePattern left empty — rule will match all names for this vendor. Refine manually after review."
+                Write-Warning "Names are too diverse for a common prefix (shortest prefix: '$prefix'). NamePattern left empty -- rule will match all names for this vendor. Refine manually after review."
             }
         }
 
-        # ── StripPatterns ─────────────────────────────────────────────────────────
-        $stripPatterns = @(
-            '\s+v?\d+[\.\d]*\s*$'   # trailing version numbers
-            '\s+\d{4}$'             # trailing standalone year token
-        )
-        if ($names | Where-Object { $_ -match '\(' }) {
-            $stripPatterns += '\s*\(.*?\)\s*$'
+        # StripPatterns (not applied for exclusion rules)
+        $stripPatterns = @()
+        if (-not $Exclude) {
+            $stripPatterns = @(
+                '\s+v?\d+[\.\d]*\s*$'
+                '\s+\d{4}$'
+            )
+            if ($names | Where-Object { $_ -match '\(' }) {
+                $stripPatterns += '\s*\(.*?\)\s*$'
+            }
         }
 
-        # ── TargetVendor ──────────────────────────────────────────────────────────
+        # TargetVendor
         $targetVendor = if ($Vendor) { $Vendor } else { $vendors | Select-Object -First 1 }
 
-        # ── Assemble rule hashtable ───────────────────────────────────────────────
+        # Rule name defaults to vendor string for exclusion rules with no FamilyName
+        $ruleName = if ($FamilyName) { $FamilyName } else { "Exclude $targetVendor" }
+
+        # Assemble rule hashtable
         $ruleHash = @{
-            RuleName      = $FamilyName
+            RuleName      = $ruleName
             Priority      = $Priority
+            IsExcludeRule = $Exclude.IsPresent
             VendorPattern = $vendorPattern
             NamePattern   = $namePattern
-            TargetFamily  = $FamilyName
-            TargetVendor  = $targetVendor
+            TargetFamily  = if ($FamilyName) { $FamilyName } else { '' }
+            TargetVendor  = if (-not $Exclude) { $targetVendor } else { '' }
             StripPatterns = $stripPatterns
             Description   = "Auto-generated from $($allItems.Count) unrecognized items"
         }
 
-        # ── Display generated rule ────────────────────────────────────────────────
+        # Display generated rule
         Write-Host "`nGenerated rule:" -ForegroundColor Cyan
         Write-Host "  RuleName      : $($ruleHash.RuleName)"
         Write-Host "  Priority      : $($ruleHash.Priority)"
+        Write-Host "  IsExcludeRule : $($ruleHash.IsExcludeRule)"
         Write-Host "  VendorPattern : $($ruleHash.VendorPattern)"
-        Write-Host "  NamePattern   : $(if ($ruleHash.NamePattern) { $ruleHash.NamePattern } else { '(empty — matches all names)' })"
-        Write-Host "  TargetFamily  : $($ruleHash.TargetFamily)"
-        Write-Host "  TargetVendor  : $($ruleHash.TargetVendor)"
-        Write-Host "  StripPatterns : $($ruleHash.StripPatterns -join ' | ')"
+        Write-Host "  NamePattern   : $(if ($ruleHash.NamePattern) { $ruleHash.NamePattern } else { '(empty - matches all names for this vendor)' })"
+        if (-not $Exclude) {
+            Write-Host "  TargetFamily  : $($ruleHash.TargetFamily)"
+            Write-Host "  TargetVendor  : $($ruleHash.TargetVendor)"
+            Write-Host "  StripPatterns : $($ruleHash.StripPatterns -join ' | ')"
+        }
         Write-Host "  Items matched : $($allItems.Count) input items`n"
 
         $rule = [NormalizationRule]::new($ruleHash)
@@ -139,7 +166,7 @@ function New-SRERule {
         }
 
         Add-SRERule -Catalog $Catalog -Rule $rule
-        Write-Host "Rule '$FamilyName' saved (RuleId: $($rule.RuleId))." -ForegroundColor Green
+        Write-Host "Rule '$ruleName' saved (RuleId: $($rule.RuleId))." -ForegroundColor Green
 
         if ($Reprocess) {
             Write-Host "Reprocessing unmatched History rows..." -ForegroundColor Cyan
