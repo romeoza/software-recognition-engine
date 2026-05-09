@@ -1,0 +1,7 @@
+.claude/
+main.ps1
+main_run.log
+zx_installs.json
+zx_inv_collector.ps1
+zx_inv_collector_2.ps1
+extensions/

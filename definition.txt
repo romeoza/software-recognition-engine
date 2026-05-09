@@ -1,0 +1,44 @@
+Solution Summary: Self-Learning Software Recognition Library
+A fully self-contained, PowerShell-native software inventory normalization and recognition engine designed for Zabbix (or any other inventory collection system). It must learn from a real environment without relying on any external databases or cloud services.
+Core Purpose
+Automatically normalize messy software inventory data (for example from zx_installs.json), group multiple variants into logical Product Families, and provide fast, accurate recognition of known and unknown software over time. Data needs to be stored in MySql using the SimplySql PowerShell module
+
+Main Components
+SoftwareCatalog - Central brain that stores all learned products, variants, versions, and lookup tables
+NormalizationEngine - Rule-based cleaning and standardization of software names/vendors
+NormalizationRule - Rule-based cleaning and standardization of software names/vendors
+FuzzyMatcher - Advanced similarity matching using Levenshtein distance + Jaccard similarity
+History - Full audit trail of all raw entries seen
+
+Key Features & Functionality
+1. Intelligent Normalization
+•	Rule-based engine with priority ordering
+•	Regex pattern matching on Vendor + Product Name
+•	Built-in rules for common enterprise software (Citrix Workspace, Cisco AnyConnect, Microsoft Edge, Adobe Acrobat, Visual C++, .NET, Epson Drivers, etc.)
+•	Easy to add custom rules at any time
+2. Self-Learning Capability
+•	Ingests inventory files (JSON) and automatically builds a catalog
+•	Learns new Product Families as it encounters them
+•	Tracks variants, versions, frequency, and first/last seen dates
+•	Builds a growing knowledge base from your actual estate
+3. Recognition Engine
+•	Exact matching (fastest, highest confidence)
+•	Fuzzy matching fallback when exact match not found
+•	Returns confidence score (0–100) and matching method
+•	Can recognize new items based on similarity to previously learned products
+4. Data Model & Catalog Features
+•	Groups multiple install names into one Product Family (e.g., dozens of Citrix entries → "Citrix Workspace")
+•	Version tracking and statistics
+•	Fast signature-based lookup table
+•	Persistent storage
+5. Extensibility
+•	Add/edit rules dynamically
+•	Custom transformation logic per rule
+•	Fuzzy matching thresholds adjustable
+•	Easy to export/import rules and catalog
+
+Typical Workflow (suggested)
+1.	Initialize → $catalog = [SoftwareCatalog]::new() or load from data source
+2.	Ingest → Feed Zabbix inventory object regularly ($catalog.AddInventory({installed_software_object}))
+3.	Recognize → Use $catalog.Recognize({softwareItem}) to recognize software
+4.	Evolve → Add new rules as needed for better normalization
