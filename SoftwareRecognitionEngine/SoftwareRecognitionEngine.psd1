@@ -22,7 +22,9 @@
         'Get-SRENewSoftware',
         'Get-SREStaleSoftware',
         'Get-SREHostCount',
-        'Get-SRETopSoftware'
+        'Get-SRETopSoftware',
+        'New-SRERule',
+        'Invoke-SREReprocess'
     )
     CmdletsToExport   = @()
     VariablesToExport = @()

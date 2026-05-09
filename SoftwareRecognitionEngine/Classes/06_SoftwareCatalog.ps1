@@ -339,6 +339,110 @@ $limitClause
         return Invoke-SqlQuery -ConnectionName $this.ConnectionName -Query $sql
     }
 
+    # Re-runs recognition on History rows that previously had no match (or low confidence).
+    # Works on unique RawVendor+RawName pairs; bulk-updates all matching History rows per pair.
+    # dryRun=true runs recognition but skips all DB writes.
+    [PSObject[]] Reprocess([string[]]$matchMethods, [int]$confidenceBelow, [bool]$dryRun) {
+
+        # Build parameterised IN list for MatchMethod
+        $methodParams = @{}
+        $placeholders = for ($i = 0; $i -lt $matchMethods.Count; $i++) {
+            $methodParams["m$i"] = $matchMethods[$i]
+            "@m$i"
+        }
+        $inClause = $placeholders -join ','
+
+        $confClause = if ($confidenceBelow -gt 0) {
+            $methodParams['thresh'] = $confidenceBelow
+            "OR (h.MatchMethod NOT IN ($inClause) AND h.MatchConfidence < @thresh)"
+        } else { '' }
+
+        # Fetch one representative row per unique pair (most recent History entry)
+        $sql = @"
+SELECT h.RawVendor, h.RawName, h.DisplayVersion, h.SourceHost,
+       h.SoftwareId, h.Guid, h.RawUser, h.RegistryKey,
+       h.MatchMethod AS OldMethod, h.MatchConfidence AS OldConfidence
+FROM History h
+INNER JOIN (
+    SELECT RawVendor, RawName, MAX(HistoryId) AS LatestId
+    FROM History
+    WHERE MatchMethod IN ($inClause) $confClause
+    GROUP BY RawVendor, RawName
+) latest ON h.HistoryId = latest.LatestId
+"@
+        $pairs = @(Invoke-SqlQuery -ConnectionName $this.ConnectionName `
+            -Query $sql -Parameters $methodParams -WarningAction SilentlyContinue)
+
+        $results = [System.Collections.Generic.List[PSObject]]::new()
+
+        foreach ($pair in $pairs) {
+            $item = [PSCustomObject]@{
+                Vendor         = [string]$pair.RawVendor
+                Name           = [string]$pair.RawName
+                DisplayVersion = [string]$pair.DisplayVersion
+                SourceHost     = [string]$pair.SourceHost
+                SoftwareId     = if ($pair.SoftwareId) { $pair.SoftwareId } else { 0 }
+                Guid           = [string]$pair.Guid
+                RawUser        = [string]$pair.RawUser
+                RegistryKey    = [string]$pair.RegistryKey
+                InstallDate    = $null
+            }
+
+            $result = $this.Recognize($item)
+
+            $improved = $result.FamilyId -gt 0 -and $result.MatchMethod -ne 'None' -and
+                        ($pair.OldMethod -eq 'None' -or $result.Confidence -gt [int]$pair.OldConfidence)
+
+            if ($improved -and -not $dryRun) {
+                # Ensure the family row exists in ProductFamilies before FK-constrained inserts
+                $family = $this._GetOrCreateFamily($result.FamilyName, [string]$item.Vendor)
+                $result.FamilyId = $family.FamilyId
+
+                # Update all History rows for this vendor+name pair
+                Invoke-SqlUpdate -ConnectionName $this.ConnectionName -Query @'
+UPDATE History
+SET    FamilyId        = @fid,
+       ProductId       = @pid,
+       MatchMethod     = @method,
+       MatchConfidence = @conf
+WHERE  RawVendor = @vendor
+  AND  RawName   = @name
+  AND  (MatchMethod IN ('None','') OR MatchConfidence < @conf)
+'@ -Parameters @{
+                    fid    = $result.FamilyId
+                    pid    = if ($result.ProductId -gt 0) { $result.ProductId } else { [DBNull]::Value }
+                    method = $result.MatchMethod
+                    conf   = $result.Confidence
+                    vendor = [string]$pair.RawVendor
+                    name   = [string]$pair.RawName
+                } | Out-Null
+
+                # Upsert product and variant, refresh lookup cache
+                $productId = $this._UpsertProduct($item, $result)
+                if ($productId -gt 0) {
+                    $result.ProductId = $productId
+                    $this._UpsertVariant($item, $result)
+                }
+                $cacheKey = $this._MakeLookupKey($item.Vendor, $item.Name)
+                $this._AddToLookupCache($cacheKey, $result.FamilyId, $result.FamilyName,
+                    $result.ProductId, $result.Confidence, $result.MatchMethod)
+            }
+
+            $results.Add([PSCustomObject]@{
+                RawVendor     = [string]$pair.RawVendor
+                RawName       = [string]$pair.RawName
+                OldMethod     = [string]$pair.OldMethod
+                OldConfidence = [int]$pair.OldConfidence
+                NewMethod     = $result.MatchMethod
+                NewConfidence = $result.Confidence
+                FamilyName    = $result.FamilyName
+                Updated       = $improved
+            })
+        }
+
+        return $results.ToArray()
+    }
+
     # == Initialisation ==========================================================
 
     hidden [void] _Init([string]$connName, [string]$connStr) {
