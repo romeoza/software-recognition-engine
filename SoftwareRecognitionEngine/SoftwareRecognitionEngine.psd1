@@ -11,7 +11,18 @@
         'Add-SREInventory',
         'Invoke-SRERecognize',
         'Add-SRERule',
-        'Export-SRECatalog'
+        'Export-SRECatalog',
+        'Get-SREFamily',
+        'Get-SREProduct',
+        'Get-SREVariant',
+        'Get-SREHostInventory',
+        'Get-SREVersionSprawl',
+        'Get-SREUnrecognized',
+        'Get-SRELowConfidence',
+        'Get-SRENewSoftware',
+        'Get-SREStaleSoftware',
+        'Get-SREHostCount',
+        'Get-SRETopSoftware'
     )
     CmdletsToExport   = @()
     VariablesToExport = @()

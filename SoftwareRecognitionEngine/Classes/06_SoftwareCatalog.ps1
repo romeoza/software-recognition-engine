@@ -151,6 +151,194 @@ class SoftwareCatalog {
         return $stats
     }
 
+    # == Query API ===============================================================
+
+    # Returns all known product families (no filter)
+    # Overload: filtered by name and/or vendor (LIKE match)
+    [PSObject[]] GetFamilies([string]$nameFilter, [string]$vendorFilter) {
+        $where  = @()
+        $params = @{}
+        if ($nameFilter)   { $where += 'FamilyName LIKE @name';   $params['name']   = "%$nameFilter%" }
+        if ($vendorFilter) { $where += 'Vendor LIKE @vendor';     $params['vendor'] = "%$vendorFilter%" }
+        $sql = 'SELECT * FROM ProductFamilies'
+        if ($where) { $sql += ' WHERE ' + ($where -join ' AND ') }
+        $sql += ' ORDER BY FamilyName'
+        return Invoke-SqlQuery -ConnectionName $this.ConnectionName -Query $sql -Parameters $params
+    }
+
+    # Returns products joined to their family; optionally filtered by FamilyId and/or name search
+    [PSObject[]] GetProducts([int]$familyId, [string]$search) {
+        $where  = @()
+        $params = @{}
+        if ($familyId -gt 0) { $where += 'p.FamilyId = @fid';          $params['fid']    = $familyId }
+        if ($search)          { $where += 'p.ProductName LIKE @search'; $params['search'] = "%$search%" }
+        $sql = @'
+SELECT p.ProductId, p.FamilyId, f.FamilyName, p.ProductName, p.Vendor,
+       p.InstallCount, p.FirstSeen, p.LastSeen
+FROM Products p
+JOIN ProductFamilies f ON f.FamilyId = p.FamilyId
+'@
+        if ($where) { $sql += ' WHERE ' + ($where -join ' AND ') }
+        $sql += ' ORDER BY f.FamilyName, p.ProductName'
+        return Invoke-SqlQuery -ConnectionName $this.ConnectionName -Query $sql -Parameters $params
+    }
+
+    # Returns raw name variants for a product ordered by frequency
+    # NormalizedKey encodes lower(vendor)::lower(name)::version — the trailing segment is the version
+    [PSObject[]] GetVariants([int]$productId) {
+        return Invoke-SqlQuery -ConnectionName $this.ConnectionName -Query @'
+SELECT v.VariantId, v.ProductId, p.ProductName, v.RawName, v.RawVendor,
+       SUBSTRING_INDEX(v.NormalizedKey, '::', -1) AS Version,
+       v.SeenCount, v.FirstSeen, v.LastSeen
+FROM Variants v
+JOIN Products p ON p.ProductId = v.ProductId
+WHERE v.ProductId = @pid
+ORDER BY v.SeenCount DESC, v.RawName
+'@ -Parameters @{ pid = $productId }
+    }
+
+    # Returns distinct source hosts with item and recency counts
+    [PSObject[]] GetHosts() {
+        return Invoke-SqlQuery -ConnectionName $this.ConnectionName `
+            -Query "SELECT SourceHost, COUNT(*) AS ItemCount, MAX(SeenAt) AS LastSeen FROM History WHERE SourceHost <> '' GROUP BY SourceHost ORDER BY SourceHost"
+    }
+
+    # Returns History rows for a given host pattern (LIKE); limit=0 means no limit
+    [PSObject[]] GetHostInventory([string]$hostName, [int]$limit) {
+        $limitClause = if ($limit -gt 0) { "LIMIT $limit" } else { '' }
+        $sql = @"
+SELECT h.SourceHost, h.RawName, h.RawVendor, h.DisplayVersion,
+       f.FamilyName, h.MatchMethod, h.MatchConfidence, h.SeenAt
+FROM History h
+LEFT JOIN ProductFamilies f ON f.FamilyId = h.FamilyId
+WHERE h.SourceHost LIKE @host
+ORDER BY h.SeenAt DESC
+$limitClause
+"@
+        return Invoke-SqlQuery -ConnectionName $this.ConnectionName -Query $sql -Parameters @{ host = "%$hostName%" }
+    }
+
+    # Returns distinct version counts for a family, ordered by host count descending
+    [PSObject[]] GetVersionSprawl([int]$familyId, [int]$limit) {
+        $limitClause = if ($limit -gt 0) { "LIMIT $limit" } else { '' }
+        $sql = @"
+SELECT f.FamilyName, h.DisplayVersion,
+       COUNT(DISTINCT h.SourceHost) AS HostCount,
+       COUNT(*)                     AS InstallCount,
+       MIN(h.SeenAt)                AS FirstSeen,
+       MAX(h.SeenAt)                AS LastSeen
+FROM History h
+JOIN ProductFamilies f ON f.FamilyId = h.FamilyId
+WHERE h.FamilyId = @fid
+  AND h.DisplayVersion <> ''
+GROUP BY f.FamilyName, h.DisplayVersion
+ORDER BY HostCount DESC, h.DisplayVersion
+$limitClause
+"@
+        return Invoke-SqlQuery -ConnectionName $this.ConnectionName -Query $sql -Parameters @{ fid = $familyId }
+    }
+
+    # Returns History rows the engine could not identify (MatchMethod = None or empty)
+    [PSObject[]] GetUnrecognized([string]$hostName, [int]$limit) {
+        $where  = "(h.MatchMethod = 'None' OR h.MatchMethod = '')"
+        $params = @{}
+        if ($hostName) { $where += ' AND h.SourceHost LIKE @host'; $params['host'] = "%$hostName%" }
+        $limitClause = if ($limit -gt 0) { "LIMIT $limit" } else { '' }
+        $sql = @"
+SELECT h.SourceHost, h.RawVendor, h.RawName, h.DisplayVersion,
+       h.MatchMethod, h.MatchConfidence, h.SeenAt
+FROM History h
+WHERE $where
+ORDER BY h.SeenAt DESC
+$limitClause
+"@
+        return Invoke-SqlQuery -ConnectionName $this.ConnectionName -Query $sql -Parameters $params
+    }
+
+    # Returns Fuzzy/Learned History rows below a confidence threshold — uncertain matches
+    [PSObject[]] GetLowConfidence([int]$threshold, [int]$limit) {
+        $limitClause = if ($limit -gt 0) { "LIMIT $limit" } else { '' }
+        $sql = @"
+SELECT h.SourceHost, h.RawVendor, h.RawName, h.DisplayVersion,
+       f.FamilyName, h.MatchMethod, h.MatchConfidence, h.SeenAt
+FROM History h
+LEFT JOIN ProductFamilies f ON f.FamilyId = h.FamilyId
+WHERE h.MatchMethod IN ('Fuzzy','Learned')
+  AND h.MatchConfidence < @thresh
+ORDER BY h.MatchConfidence ASC, h.SeenAt DESC
+$limitClause
+"@
+        return Invoke-SqlQuery -ConnectionName $this.ConnectionName -Query $sql -Parameters @{ thresh = $threshold }
+    }
+
+    # Returns software first seen within the last N days; optionally scoped to a host
+    [PSObject[]] GetNewSoftware([int]$days, [string]$hostName) {
+        $params     = @{ cutoff = [datetime]::UtcNow.AddDays(-$days) }
+        $hostFilter = ''
+        if ($hostName) { $hostFilter = 'AND h.SourceHost LIKE @host'; $params['host'] = "%$hostName%" }
+        $sql = @"
+SELECT h.RawVendor, h.RawName, h.DisplayVersion, f.FamilyName,
+       h.MatchMethod, h.MatchConfidence,
+       MIN(h.SeenAt) AS FirstSeen, h.SourceHost
+FROM History h
+LEFT JOIN ProductFamilies f ON f.FamilyId = h.FamilyId
+WHERE h.SeenAt >= @cutoff
+$hostFilter
+GROUP BY h.RawVendor, h.RawName, h.DisplayVersion, h.SourceHost,
+         f.FamilyName, h.MatchMethod, h.MatchConfidence
+ORDER BY FirstSeen DESC
+"@
+        return Invoke-SqlQuery -ConnectionName $this.ConnectionName -Query $sql -Parameters $params
+    }
+
+    # Returns Products not seen in History within the last N days — potentially uninstalled
+    [PSObject[]] GetStaleSoftware([int]$days) {
+        return @(Invoke-SqlQuery -ConnectionName $this.ConnectionName -WarningAction SilentlyContinue -Query @'
+SELECT p.ProductId, f.FamilyName, p.ProductName, p.Vendor,
+       p.InstallCount, p.LastSeen,
+       DATEDIFF(NOW(), p.LastSeen) AS DaysSinceLastSeen
+FROM Products p
+JOIN ProductFamilies f ON f.FamilyId = p.FamilyId
+WHERE p.LastSeen < DATE_SUB(NOW(), INTERVAL @days DAY)
+ORDER BY p.LastSeen ASC
+'@ -Parameters @{ days = $days })
+    }
+
+    # Returns host count and install totals for a specific product family
+    [PSObject[]] GetHostCount([int]$familyId) {
+        return Invoke-SqlQuery -ConnectionName $this.ConnectionName -Query @'
+SELECT f.FamilyName,
+       COUNT(DISTINCT h.SourceHost) AS HostCount,
+       COUNT(*)                     AS TotalInstalls,
+       MIN(h.SeenAt)                AS FirstSeen,
+       MAX(h.SeenAt)                AS LastSeen
+FROM History h
+JOIN ProductFamilies f ON f.FamilyId = h.FamilyId
+WHERE h.FamilyId = @fid
+  AND h.SourceHost <> ''
+GROUP BY f.FamilyName
+'@ -Parameters @{ fid = $familyId }
+    }
+
+    # Returns top N product families ranked by HostCount or InstallCount
+    [PSObject[]] GetTopSoftware([string]$rankBy, [int]$limit) {
+        $orderCol    = if ($rankBy -eq 'InstallCount') { 'TotalInstalls' } else { 'HostCount' }
+        $limitClause = if ($limit -gt 0) { "LIMIT $limit" } else { 'LIMIT 25' }
+        $sql = @"
+SELECT f.FamilyName, f.Vendor,
+       COUNT(DISTINCT h.SourceHost) AS HostCount,
+       COUNT(*)                     AS TotalInstalls,
+       MAX(h.SeenAt)                AS LastSeen
+FROM History h
+JOIN ProductFamilies f ON f.FamilyId = h.FamilyId
+WHERE h.SourceHost <> ''
+GROUP BY f.FamilyId, f.FamilyName, f.Vendor
+ORDER BY $orderCol DESC
+$limitClause
+"@
+        return Invoke-SqlQuery -ConnectionName $this.ConnectionName -Query $sql
+    }
+
     # == Initialisation ==========================================================
 
     hidden [void] _Init([string]$connName, [string]$connStr) {
